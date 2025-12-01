@@ -113,6 +113,14 @@ ci_summary <- boot_df %>%
     .groups = "drop"
   )
 
+# Compute mean and SD for the article
+ci_stats = boot_df %>%
+  group_by(group) %>%
+  summarise(
+    mean_constraint = mean(mean_abs_r, na.rm = TRUE),
+    sd_constraint = sd(mean_abs_r, na.rm = TRUE)
+  )
+
 # Colors (two colors for the inner violins)
 mycols <- c("Low political interest" = "#40B0A6",   
             "High political interest" = "#E1BE6A")  
@@ -163,10 +171,9 @@ jpeg(here("Output", "bna", "Fig2_a.jpg"),
 
 # Generate the qgraph plot
 qgraph(
-corr, layout = 'spring', labels = colnames(corr),
-edge.color = "black",  color = "#40B0A6",
+corr, layout = 'spring', labels = colnames(corr), color = "#40B0A6",
 borders = TRUE, vsize = 9.5, esize = 7, label.cex = 1,
-label.scale = F)
+label.scale = F, theme = "colorblind")
 
 dev.off()
 ```
@@ -624,8 +631,7 @@ fit_mgm <- mgm(
   type   = type,
   level  = level,
   k      = 2,        # pairwise
-  lambda.sel = "EBIC",  # or "CV"
-  lambdaGam  = 0.25,    # EBIC gamma
+  lambda.sel = "CV",  # or "CV"
   ruleReg    = "AND"    # AND-rule for edge selection
 )  
 
