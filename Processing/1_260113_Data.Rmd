@@ -1,0 +1,189 @@
+---
+title: "Data_managment"
+author: "Arturo Bertero"
+date: "2025-11-26"
+output: html_document
+---
+
+# Input
+
+```{r}
+#Libraries
+library(pacman)
+p_load(tidyverse, here, summarytools, janitor, mice)
+
+#Options
+rm(list = ls())
+options(scipen = 99)
+```
+
+```{r}
+#Data 
+data = read.csv(here("Input", "anes.csv")) %>%
+  clean_names() 
+  
+```
+
+# Processing
+
+```{r}
+data_clean <- data %>% 
+  mutate(
+    # Party ID as numeric (1-7) 
+    pid_raw  = ifelse(v241221 < 0 | v241221 >= 95, NA, v241221),
+    pid_str  = ifelse(v241222 < 0 | v241222 >= 95, NA, v241222),
+    pid_lean = ifelse(v241223 < 0 | v241223 >= 95, NA, v241223),
+    
+    Party_id = case_when(
+      pid_raw == 1 & pid_str == 1 ~ 1,            # Strong Dem
+      pid_raw == 1 & pid_str == 2 ~ 2,            # Weak Dem
+      pid_raw %in% c(0,3,5) & pid_lean == 3 ~ 3,  # Lean Dem
+      pid_raw %in% c(0,3,5) & pid_lean == 2 ~ 4,  # Pure Ind
+      pid_raw %in% c(0,3,5) & pid_lean == 1 ~ 5,  # Lean Rep
+      pid_raw == 2 & pid_str == 2 ~ 6,            # Weak Rep
+      pid_raw == 2 & pid_str == 1 ~ 7,            # Strong Rep
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  # Other vars
+  transmute(
+    # Attitudes (net vars)
+    Abortion     = v241248,
+    Black        = v241255,
+    Law_order    = v241397,
+    Gov_services = v241239,
+    Defense      = v241242,
+    Insurance    = v241245,
+    Environment  = v241258,
+    Lib_cons     = v241177,
+    Party_id     = Party_id,
+    
+    # Validation / Covariates
+    Gender       = v241003,
+    Pol_int      = v241004,
+    Education    = v241463
+  ) %>%
+  
+  # Clean 1-7 scales and Recode polarity
+  mutate(
+    across(
+      c(Abortion, Black, Law_order, Gov_services, Defense, Insurance,
+        Environment, Lib_cons, Party_id),
+      ~ ifelse(.x %in% 1:7, as.numeric(.x), NA_real_)
+    ),
+    # Flip Gov_services so high = conservative
+    Gov_services = ifelse(!is.na(Gov_services), 8 - Gov_services, NA_real_)
+  ) %>%
+  
+  # Clean Lib_cons
+  mutate(
+    Lib_cons = ifelse(Lib_cons < 0 | Lib_cons >= 95, NA_real_, as.numeric(Lib_cons))
+  ) %>%
+
+  # Clean Covariates
+  mutate(
+    # Gender (Factor)
+    Gender = case_when(
+      Gender == 1 ~ "Man",
+      Gender == 2 ~ "Woman", 
+      TRUE ~ "Other"
+    ),
+    Gender = factor(Gender),
+    
+    # Pol_int (Numeric, High = Interested)
+    Pol_int = ifelse(Pol_int < 0, NA_real_, as.numeric(Pol_int)),
+    Pol_int = ifelse(!is.na(Pol_int), 6 - Pol_int, NA_real_),
+    
+    # Education (Ordered Factor)
+    Education = ifelse(Education < 0 | Education >= 95, NA_integer_, as.integer(Education)),
+    educ_3cat = case_when(
+      Education %in% 1:9   ~ "Low",
+      Education %in% 10:12 ~ "Mid",
+      Education %in% 13:16 ~ "High",
+      TRUE ~ NA_character_
+    ),
+    Education = factor(educ_3cat, levels = c("Low", "Mid", "High"), ordered = TRUE)
+  ) %>%
+  select(-educ_3cat)
+
+```
+
+```{r}
+#Inspect
+map(data_clean, ~ table(.x, useNA = "always"))
+```
+
+```{r}
+# MICE
+
+# Helper function to calculate mode for Gender/Educ
+get_mode <- function(x) {
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
+
+# Manage data type
+anes_mice <- data_clean %>%
+  mutate(
+    # Numeric vars 
+    across(
+      c(Abortion, Black, Law_order, Gov_services,
+        Defense, Insurance, Environment,
+        Lib_cons, Pol_int, Party_id), 
+      as.numeric
+    ),
+    
+    # Ordered Factors (Educ)
+    Education = factor(Education, levels = c("Low", "Mid", "High"), ordered = TRUE),
+    
+    # Unordered Factor (Gender)
+    Gender = factor(Gender)
+  )
+
+# Setup MICE
+meth <- make.method(anes_mice)
+pred <- make.predictorMatrix(anes_mice)
+
+# Define Methods
+num_vars <- c("Abortion", "Black", "Law_order", "Gov_services",
+              "Defense", "Insurance", "Environment", "Lib_cons", 
+              "Pol_int", "Party_id") 
+
+meth[num_vars] <- "pmm"        # Predictive Mean Matching (allows averaging later)
+meth["Gender"]    <- "polyreg" # Unordered Categorical
+meth["Education"] <- "polr"    # Ordered Categorical
+
+# Run MICE with 10 imputations
+imp <- mice(
+  anes_mice,
+  m = 10,        
+  maxit = 20,    
+  method = meth,
+  predictorMatrix = pred,
+  seed = 1234,
+  printFlag = FALSE
+)
+
+# Pooling
+anes_imputed_robust <- complete(imp, action = "long", include = FALSE) %>%
+  group_by(.id) %>%
+  summarise(
+    # Numeric variables (including Party_id) get AVERAGED
+    across(where(is.numeric), mean),
+    
+    # Factors (Gender, Education) get the MODE
+    across(where(is.factor), get_mode),
+    
+    .groups = "drop"
+  ) %>%
+  select(-.id, -.imp)
+```
+
+# Output
+
+```{r}
+# Save the imputed dataset
+saveRDS(anes_imputed_robust, here("Input", "anes_imputed.RDS"))
+
+```
+

@@ -1,0 +1,818 @@
+---
+title: "Correlational_models and mgm"
+author: "Arturo Bertero"
+date: "2025-11-26"
+output: html_document
+---
+
+# Input
+
+```{r}
+#Libraries
+library(pacman)
+p_load(tidyverse, here, ggcorrplot, patchwork, ggplot2, qgraph, magick,
+       corclass, ggpubr, nnet, sjPlot, scales, EGAnet, mgm, effectsize)
+
+#Options
+rm(list = ls())
+options(scipen = 99)
+```
+
+```{r}
+#Data 
+data = readRDS(here("Input", "anes_imputed.RDS")) 
+
+#Attitudes df
+att = data %>% select(Abortion:Party_id)
+
+#Names of attitudes
+att_vars <- c(
+  "Abortion", "Black", "Law_order", "Gov_services",
+  "Defense", "Insurance", "Environment", "Lib_cons", "Party_id"
+)
+```
+
+# Processing
+
+## Correlation (Converse)
+
+### Matrix
+
+```{r}
+## Corr matrix
+
+# Corr and pval
+corr <- round(cor(att, use = "pairwise.complete.obs"), 2) 
+p.mat <- cor_pmat(att)
+
+
+# Plot
+corr_plot <- ggcorrplot(
+  corr, 
+  method = "square", 
+  type = "lower", 
+  p.mat = p.mat,      
+  insig = "blank",    
+  hc.order = TRUE,    
+  outline.color = "white", 
+  lab = TRUE,
+  lab_size = 6,
+  tl.cex = 18,
+) +
+  ggtitle("Correlation Matrix") +
+  theme(
+    legend.position = "none", 
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 20)
+  )
+
+corr_plot
+
+ggsave(here("Output", "cor", "9corr_plot.jpg"), corr_plot,
+       width = 12, height = 8, dpi = 600)
+```
+
+### Violins 
+
+```{r}
+# Constraint
+
+# Split data by political interest
+pol_int_low  <- data %>% filter(Pol_int %in% 1:3) # Low = 1,2,3
+pol_int_high <- data %>% filter(Pol_int %in% 4:5)
+
+# function to compute mean absolute off-diagonal correlation
+mean_abs_cor <- function(df, vars) {
+  sub <- df %>% select(all_of(vars))
+  # correlation matrix with pairwise deletion (does n t matter if u work with imputed data)
+  cm  <- cor(sub, use = "pairwise.complete.obs")
+  # take off-diagonal elements only
+  off_diag <- cm[upper.tri(cm)]
+  mean(abs(off_diag), na.rm = TRUE)
+}
+
+# Bootstrap mean correlational strength for each group
+set.seed(123)  
+B <- 1000      
+
+boot_strength <- function(df, vars, B = 1000) {
+  n <- nrow(df)
+  map_dbl(1:B, ~ {
+    idx <- sample.int(n, size = n, replace = TRUE)
+    mean_abs_cor(df[idx, , drop = FALSE], vars)
+  })
+}
+
+boot_low  <- boot_strength(pol_int_low,  att_vars, B)
+boot_high <- boot_strength(pol_int_high, att_vars, B)
+
+# Put bootstrap results into a long data frame for plotting
+boot_df <- bind_rows(
+  tibble(group = "Low political interest",  mean_abs_r = boot_low),
+  tibble(group = "High political interest", mean_abs_r = boot_high)
+)
+
+# Compute bootstrap CIs 
+ci_summary <- boot_df %>%
+  group_by(group) %>%
+  summarise(
+    est   = mean(mean_abs_r),
+    lower = quantile(mean_abs_r, 0.025),
+    upper = quantile(mean_abs_r, 0.975),
+    .groups = "drop"
+  )
+
+# Compute mean and SD for the article
+ci_stats = boot_df %>%
+  group_by(group) %>%
+  summarise(
+    mean_constraint = mean(mean_abs_r, na.rm = TRUE),
+    sd_constraint = sd(mean_abs_r, na.rm = TRUE)
+  )
+
+# Colors (two colors for the inner violins)
+mycols <- c("Low political interest" = "#40B0A6",   
+            "High political interest" = "#E1BE6A")  
+
+#values
+ci_summary
+
+# violin plot
+violin <- ggplot(boot_df, aes(
+    # fix violin order
+    x = factor(group, levels = c("Low political interest", "High political interest")), 
+    y = mean_abs_r, 
+    fill = group
+  )) +
+  geom_violin(width = 1.0, alpha = 0.8, color = "black", trim = FALSE) +
+  scale_fill_manual(values = mycols) +
+  coord_cartesian(ylim = c(0.25, 0.65)) +    
+  labs(
+    y = "Constraint",
+    x = NULL,
+    title = "Belief constraint"
+  ) + 
+  scale_y_continuous(
+    breaks = seq(0.25, 0.65, by = 0.05)
+  ) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 20), 
+    axis.text.x = element_text(size = 18, face = "bold", color = "black"), 
+    axis.text.y = element_text(size = 15, color = "black"),
+    axis.title.y = element_text(size = 18, face = "bold", margin = margin(r = 10))
+  )
+
+violin
+
+ggsave(here("Output", "cor", "9violin.jpg"), violin,
+       width = 12, height = 8, dpi = 600)
+```
+```{r}
+## Network
+
+# Inspect the corr matrix
+corr
+
+# Open a JPG device 
+jpeg(here("Output", "cor", "9corr_net.jpg"),
+      width = 12, height = 8, units = "in", res = 600)
+
+# Generate the qgraph plot
+qgraph(
+corr, layout = 'spring', labels = colnames(corr), color = "#40B0A6",
+borders = TRUE, vsize = 14, esize = 9, label.cex = 1.5,
+label.scale = F, theme = "colorblind")
+
+dev.off()
+```
+
+
+## BNA
+
+### Network
+
+```{r}
+## Network
+
+#For BNA we square the corr matrix
+
+# Square the corr matrix
+corr_sq <- corr^2
+
+# Open a JPG device 
+jpeg(here("Output", "bna", "9Fig2_a.jpg"),
+      width = 12, height = 8, units = "in", res = 600)
+
+# Generate the qgraph plot
+qgraph(
+corr_sq, layout = 'spring', labels = colnames(corr), color = "#40B0A6",
+borders = TRUE, vsize = 14, esize = 9, label.cex = 1.5,
+label.scale = F, theme = "colorblind")
+
+dev.off()
+```
+
+### Centrality
+
+```{r}
+## Centrality
+cent = centralityPlot(corr_sq, scale = "raw", orderBy = "Strength") +
+  theme(
+    axis.text.y = element_text(size = 15),
+    axis.text.x = element_text(size = 15),
+    strip.text   = element_text(size = 20, face = "bold")
+    
+  ) 
+
+ggsave(here("Output", "bna", "9Fig2_b.jpg"), cent,
+        height = 8, width = 12)
+```
+
+
+## CCA
+
+### Model and data
+
+```{r}
+#CCA applied to attitudes
+cca_att <- cca(att, filter.significance = TRUE, filter.value = 0.05, 
+                 zero.action = c("ownclass"))
+
+# cca_att <- cca(att, filter.significance = TRUE, filter.value = 0.10, 
+#                  zero.action = c("ownclass"))
+```
+
+
+```{r}
+# Preliminary plots
+plot(cca_att, 1)
+plot(cca_att, 2)
+plot(cca_att, 3)
+plot(cca_att, 4)
+plot(cca_att, 5)
+```
+
+```{r}
+# save cor mat
+ cca1 = cca_att[["modules"]][[1]][["cormat"]]
+ cca2 = cca_att[["modules"]][[3]][["cormat"]]
+ cca3 = cca_att[["modules"]][[4]][["cormat"]]
+ cca4 = cca_att[["modules"]][[5]][["cormat"]]
+
+# Add membership data to data 
+data_cca = data
+data_cca$cca = cca_att$membership
+
+```
+
+```{r}
+#Create dat_cca* obj for p mat
+dat_cca1 = data_cca %>% filter(cca == 1) %>% select(Abortion:Party_id)
+dat_cca2 = data_cca %>% filter(cca == 3) %>% select(Abortion:Party_id)
+dat_cca3 = data_cca %>% filter(cca == 4) %>% select(Abortion:Party_id)
+dat_cca4 = data_cca %>% filter(cca == 5) %>% select(Abortion:Party_id)
+
+# do p mat
+pmat1 <- cor_pmat(dat_cca1, use = "pairwise.complete.obs", method = "pearson")
+pmat2 <- cor_pmat(dat_cca2, use = "pairwise.complete.obs", method = "pearson")
+pmat3 <- cor_pmat(dat_cca3, use = "pairwise.complete.obs", method = "pearson")
+pmat4 <- cor_pmat(dat_cca4, use = "pairwise.complete.obs", method = "pearson")
+```
+
+```{r}
+#Create the plotting dataset from data_cca
+data_cca_reg <- data_cca %>% 
+  select(Gender, Pol_int, Education, Party_id, cca) %>%
+  mutate(
+    cca_rec = case_when(
+      cca == 1 ~ "Group 1",
+      cca == 3 ~ "Group 2",
+      cca == 4 ~ "Group 3",
+      cca == 5 ~ "Group 4",
+      TRUE ~ NA_character_ 
+    ),
+    
+    # Order the factor explicitly
+    cca_rec = factor(cca_rec, levels = c("Group 1", "Group 2", "Group 3", "Group 4"))
+  )
+```
+
+
+### Matrices
+
+```{r}
+## Matrix plot
+
+# labels for the four modules (adapt as needed)
+cca_groups_names <- c("Group 1 (n=1058)", "Group 2 (n=1622)", "Group 3 (n=1872)", "Group 4 (n=952)")
+
+# CCA1
+plot_cca1 <- ggcorrplot(
+  cca1,
+  method = "square",
+  type   = "lower",
+  outline.color = "white",
+  lab      = TRUE,
+  lab_size = 6,        
+  tl.cex   = 15,
+  p.mat = pmat1,
+  insig = "blank"
+) +
+  ggtitle(cca_groups_names[1]) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+    plot.margin = margin(2, 2, 2, 2, "mm")
+  )
+
+# CCA2
+plot_cca2 <- ggcorrplot(
+  cca2,
+  method = "square",
+  type   = "lower",
+  outline.color = "white",
+  lab      = TRUE,
+  lab_size = 6,        
+  tl.cex   = 15,
+  p.mat = pmat2,
+  insig = "blank"
+) +
+  ggtitle(cca_groups_names[2]) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+    plot.margin = margin(2, 2, 2, 2, "mm")
+  )
+
+# CCA3
+plot_cca3 <- ggcorrplot(
+  cca3,
+  method = "square",
+  type   = "lower",
+  outline.color = "white",
+  lab      = TRUE,
+  lab_size = 6,        
+  tl.cex   = 15,
+  p.mat = pmat3,
+  insig = "blank"
+) +
+  ggtitle(cca_groups_names[3]) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+    plot.margin = margin(2, 2, 2, 2, "mm")
+  )
+
+# CCA4
+plot_cca4 <- ggcorrplot(
+  cca4,
+  method = "square",
+  type   = "lower",
+  outline.color = "white",
+  lab      = TRUE,
+  lab_size = 6,        
+  tl.cex   = 15,
+  p.mat = pmat4,
+  insig = "blank"
+) +
+  ggtitle(cca_groups_names[4]) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+    plot.margin = margin(2, 2, 2, 2, "mm")
+  )
+
+plot_cca_list <- list(plot_cca1, plot_cca2, plot_cca3, plot_cca4)
+
+g_plot_cca <- ggarrange(
+  plotlist = plot_cca_list,
+  ncol = 2,
+  nrow = 2
+)
+
+ggsave(
+  here("Output", "cca", "9CCA_corrs.jpeg"),
+  g_plot_cca,
+  dpi = 600,
+  height = 12,
+  width  = 12
+)
+```
+
+### Networks
+
+```{r}
+##Network plot
+
+# Same group titles as in the ggcorrplot figure
+cca_groups_names <- c(
+  "Group 1 (n=1058)",
+  "Group 2 (n=1622)",
+  "Group 3 (n=1872)",
+  "Group 4 (n=952)"
+)
+
+# Open device for multi-panel figure
+jpeg(
+  here("Output", "cca", "9CCA_networks.jpeg"),
+  width = 2480,   
+  height = 3508,  
+  quality = 100,
+  res = 300
+)
+
+# Common layout for all four networks
+L <- averageLayout(cca1, cca2, cca3, cca4, layout = "spring")
+
+# Matrix layout: 2 rows, 2 columns
+lmat <- matrix(1:4, 2, 2, byrow = TRUE)
+layout(lmat, widths = c(1, 1), heights = c(1, 1))
+
+# 1: Group 1 [put layout = L for standardized layout]
+set.seed(1)
+g1 <- qgraph(
+  cca1, layout = "spring", 
+  labels = colnames(cca1),
+  color = "#40B0A6",
+borders = TRUE, vsize = 18, esize = 10, label.cex = 1,
+label.scale = F, title = cca_groups_names[1], title.cex = 2,
+  theme = "colorblind",
+  mar = c(5, 5, 5, 5)
+)
+
+# 2: Group 2
+g2 <- qgraph(
+  cca2, layout = "spring", 
+  labels = colnames(cca1),
+  color = "#40B0A6",
+borders = TRUE, vsize = 18, esize = 10, label.cex = 1,
+label.scale = F, title = cca_groups_names[2], title.cex = 2,
+  theme = "colorblind",
+  mar = c(5, 5, 5, 5)
+)
+
+# 3: Group 3
+g3 <- qgraph(
+  cca3, layout = "spring", 
+  labels = colnames(cca1),
+  color = "#40B0A6",
+borders = TRUE, vsize = 18, esize = 10, label.cex = 1,
+label.scale = F, title = cca_groups_names[3], title.cex = 2,
+  theme = "colorblind",
+  mar = c(5, 5, 5, 5)
+)
+
+# 4: Group 4
+g4 <- qgraph(
+  cca4, layout = "spring", 
+  labels = colnames(cca1),
+  color = "#40B0A6",
+borders = TRUE, vsize = 18, esize = 10, label.cex = 1,
+label.scale = F, title = cca_groups_names[4], title.cex = 2,
+  theme = "colorblind",
+  mar = c(5, 5, 5, 5)
+)
+
+# Close device and save
+dev.off()
+```
+
+### Violins
+
+```{r}
+set.seed(123)  
+
+boot_cca1 <- boot_strength(dat_cca1, att_vars, B)
+boot_cca2 <- boot_strength(dat_cca2, att_vars, B)
+boot_cca3 <- boot_strength(dat_cca3, att_vars, B)
+boot_cca4 <- boot_strength(dat_cca4, att_vars, B)
+
+boot_cca_df <- bind_rows(
+  tibble(group = "Group 1", mean_abs_r = boot_cca1),
+  tibble(group = "Group 2", mean_abs_r = boot_cca2),
+  tibble(group = "Group 3", mean_abs_r = boot_cca3),
+  tibble(group = "Group 4", mean_abs_r = boot_cca4)
+)
+
+# CIs 
+ci_cca <- boot_cca_df %>%
+  group_by(group) %>%
+  summarise(
+    est   = mean(mean_abs_r),
+    lower = quantile(mean_abs_r, 0.025),
+    upper = quantile(mean_abs_r, 0.975),
+    .groups = "drop"
+  )
+
+ci_cca
+
+#Violin plot with 4 groups
+
+mycols_cca <- c(
+  "Group 1" = "#40B0A6",
+  "Group 2" = "#E1BE6A",
+  "Group 3" = "#D35E60",
+  "Group 4" = "#8073AC"
+)
+
+violin_cca <- ggplot(boot_cca_df, 
+                     aes(x = factor(group, 
+                                    levels = c("Group 1", "Group 2", "Group 3", "Group 4")), 
+                         y = mean_abs_r, 
+                         fill = group)) +
+  
+  # Violins
+  geom_violin(width = 1.0, alpha = 0.8, color = "black", trim = FALSE) +
+  
+  # 2. Segment for CIs
+  geom_segment(data = ci_cca, 
+               aes(x = group, xend = group, y = lower, yend = upper), 
+               inherit.aes = FALSE,
+               color = "black", linewidth = 1.2) +
+  
+  # 3.Mean 
+  geom_point(data = ci_cca, 
+             aes(x = group, y = est), 
+             inherit.aes = FALSE,
+             color = "white", fill = "black", shape = 21, size = 2, stroke = 1) +
+  
+  scale_fill_manual(values = mycols_cca) +
+  
+  # y axis
+  coord_cartesian(ylim = c(0.35, 0.65)) + 
+  scale_y_continuous(breaks = seq(0.35, 0.65, by = 0.05)) +
+  
+  labs(
+    x = NULL,
+    y = "Constraint",
+    title = "Belief constraint by CCA group"
+  ) +
+  
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+    axis.title.y = element_text(size = 18, face = "bold", margin = margin(r = 10)),
+    axis.text.x = element_text(size = 18, face = "bold", color = "black"),
+    axis.text.y = element_text(size = 15, color = "black")
+  )
+
+violin_cca
+
+ggsave(here("Output", "cca", "9cca_violins.jpg"), violin_cca,
+        width = 8, height = 4, dpi = 600)
+
+```
+
+
+### lollipop
+
+```{r}
+# Prepare Data
+plot_df <- data_cca_reg %>%
+  filter(!is.na(cca_rec)) %>%
+  
+  # Round numeric Party_id to nearest integer (1-7)
+  mutate(
+    Party_id_int = round(Party_id),
+    
+    # Convert integer back to Factor Labels for plotting
+    Party_id_fac = factor(
+      Party_id_int,
+      levels = 1:7,
+      labels = c(
+        "Strong Dem", "Weak Dem", "Lean Dem",
+        "Pure Ind",
+        "Lean Rep", "Weak Rep", "Strong Rep"
+      )
+    )
+  ) %>%
+  
+  # Now count based on the rounded factor
+  count(cca_rec, Party_id_fac) %>%
+  group_by(cca_rec) %>%
+  mutate(prop = n / sum(n)) %>%
+  ungroup()
+
+#Plot
+p_cca_party <- ggplot(plot_df, aes(x = prop, y = Party_id_fac)) +
+  
+  # Lollipop Stems
+  geom_segment(aes(x = 0, xend = prop, y = Party_id_fac, yend = Party_id_fac),
+               color = "#E1BE6A", linewidth = 1.2) + 
+  
+  # Lollipop Heads
+  geom_point(size = 4, color = "#40B0A6") + 
+  
+  facet_wrap(~ cca_rec, ncol = 2) +
+  
+  scale_x_continuous(labels = percent_format(accuracy = 1)) +
+  
+  labs(
+    x = "Share within CCA group",
+    y = NULL, 
+    title = "Party identification profile across CCA groups"
+  ) +
+  
+  theme_minimal(base_size = 13) +
+  theme(
+    # usual aestetic
+    plot.title = element_text(size = 22, face = "bold", hjust = 0.5, margin = margin(b = 15)),
+    strip.text = element_text(size = 18, face = "bold", color = "black"),
+    axis.text.y = element_text(size = 18, color = "black"), 
+    axis.text.x = element_text(size = 18, color = "black"), 
+    axis.title.x = element_text(size = 18, face = "bold", margin = margin(t = 10)),
+    panel.grid.major.y = element_blank(), 
+    panel.spacing = unit(1, "cm")         
+  )
+
+#Save
+ggsave(
+  here("Output", "cca", "9cca_party_lollipop.jpeg"),
+  p_cca_party,
+  dpi = 600,
+  height = 10, 
+  width  = 12
+)
+
+print(p_cca_party)
+```
+
+### Visualizing pol int and party id in the same plot
+
+```{r}
+#Desc
+
+#Tab
+table(data_cca_reg$cca_rec, round(data_cca_reg$Pol_int))
+table(data_cca_reg$cca_rec, round(data_cca_reg$Party_id))
+
+#Anova
+
+#Create another datasaet for dataset for testing (filters out class 2 and re-factor)
+data_test <- data_cca_reg %>%
+  filter(cca != 2) %>%                     # Drop the degenerate class
+  mutate(
+    # Recode cca to drop unused levels and be consecutive (1, 2, 3, 4)
+    cca_test = droplevels(as.factor(cca)) 
+  )
+
+# TEST 1: Political Interest 
+
+# A. Significance (ANOVA)
+model_pol <- aov(Pol_int ~ cca_test, data = data_test)
+summary(model_pol)
+
+# B. Effect Size (Magnitude)
+eta_squared(model_pol)
+
+
+#TEST 2: Party ID 
+
+# A. Significance (ANOVA)
+model_pid <- aov(Party_id ~ cca_test, data = data_test)
+summary(model_pid)
+
+# B. Effect Size (Magnitude)
+eta_squared(model_pid)
+
+
+```
+
+
+```{r}
+# Manage party ID 
+df_party <- data_cca_reg %>%
+  filter(!is.na(cca_rec)) %>%
+  mutate(
+    Val_Int = round(Party_id),
+    # Ensure Val_Int matches these levels 
+    Label   = factor(Val_Int, levels = 1:7, 
+                     labels = c("Strong Dem", "Weak Dem", "Lean Dem", "Pure Ind", 
+                                "Lean Rep", "Weak Rep", "Strong Rep"))
+  ) %>%
+  count(cca_rec, Label) %>%
+  group_by(cca_rec) %>%
+  mutate(prop = n / sum(n), Type = "Party Identification") %>%
+  ungroup()
+
+# Manage pint
+df_pol <- data_cca_reg %>%
+  filter(!is.na(cca_rec)) %>%
+  mutate(
+    Val_Int = round(Pol_int),
+    Label   = factor(Val_Int, levels = 1:5,
+                     labels = c("1 (Low)", "2", "3", "4", "5 (High)"))
+  ) %>%
+  count(cca_rec, Label) %>%
+  group_by(cca_rec) %>%
+  mutate(prop = n / sum(n), Type = "Political Interest") %>%
+  ungroup()
+
+# Combine 
+plot_composite <- bind_rows(df_party, df_pol) %>%
+  mutate(
+    Type = factor(Type, levels = c("Party Identification", "Political Interest")),
+    order_helper = as.numeric(Label)
+  )
+
+p_composite <- ggplot(plot_composite, aes(x = prop, y = reorder(Label, order_helper))) + 
+  geom_segment(aes(x = 0, xend = prop, yend = Label),
+               color = "#E1BE6A", linewidth = 1.2) +
+  geom_point(size = 3.5, color = "#40B0A6") +
+  facet_grid(Type ~ cca_rec, scales = "free_y", space = "free_y") +
+  scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    x = "Share within Group",
+    y = NULL,
+    title = "Distributions of Political Interest and Party ID by Class"
+  ) +
+  theme(
+    # usual aes
+    plot.title = element_text(size = 19, face = "bold", hjust = 0.5, margin = margin(b = 20)),
+    strip.text = element_text(size = 16, face = "bold", color = "black"),
+    strip.background = element_rect(fill = "gray95", color = NA), 
+    axis.text.y = element_text(size = 14, color = "black"),
+    axis.text.x = element_text(size = 9, color = "black"),
+    axis.title.x = element_text(size = 16, face = "bold", margin = margin(t = 15)),
+    panel.grid.major.y = element_blank(),
+    panel.spacing = unit(1, "lines") 
+  )
+
+# save
+ggsave(
+  here("Output", "cca", "9cca_composite_dist.jpeg"),
+  p_composite,
+  dpi = 600,
+  height = 6, 
+  width  = 8
+)
+```
+
+
+## mgm
+
+```{r}
+# EGA
+ega_att = EGA(att)
+
+```
+
+```{r}
+# mgm
+att_mat = as.matrix(att)
+
+p <- ncol(att_mat)          
+
+# All variables are numeric
+type  <- rep("g", p)        # "g" = Gaussian
+level <- rep(1, p)        # number of categories for each variable, 1 for g var
+
+fit_mgm <- mgm(
+  data   = att_mat,
+  type   = type,
+  level  = level,
+  k      = 2,        # pairwise
+  lambda.sel = "CV",  # or "CV"
+  ruleReg    = "AND"    # AND-rule for edge selection
+)  
+
+#Predictability
+pred_mgm <- predict(
+  object = fit_mgm,
+  data   = att_mat
+)
+
+
+# Open a JPG device 
+jpeg(here("Output", "mgm", "9Fig_mgm.jpg"),
+      width = 12, height = 8, units = "in", res = 600)
+
+# Generate the qgraph plot
+qgraph(
+fit_mgm$pairwise$wadj, layout = 'spring', labels = colnames(corr),
+edge.color = "blue",  color = "#40B0A6",
+pieColor = rep('#E1BE6A',p),
+borders = TRUE, vsize = 15, esize = 10, label.cex = 1.4,
+label.scale = F, pie = pred_mgm[["errors"]][["R2"]])
+
+dev.off()
+```
+
+```{r}
+colnames(fit_mgm$pairwise$wadj) = names(att)
+rownames(fit_mgm$pairwise$wadj) = names(att)
+
+## Centrality
+cent_mgm = centralityPlot(fit_mgm$pairwise$wadj, scale = "raw", orderBy = "Strength") +
+  theme(
+    axis.text.y = element_text(size = 15),
+    axis.text.x = element_text(size = 15),
+    strip.text   = element_text(size = 20, face = "bold")
+  ) 
+
+ggsave(here("Output", "mgm", "9Fig_mgm_b.jpg"), cent_mgm,
+        height = 8, width = 12)
+
+```
+
